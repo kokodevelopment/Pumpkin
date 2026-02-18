@@ -40,9 +40,9 @@ jobs:
             artifact_suffix: x64-macos
 
           # new: dedicated Linux i686 job
-          - os: blacksmith-2vcpu-ubuntu-2404
-            target: i686-unknown-linux-gnu
-            artifact_suffix: i686-ubuntu
+          #- os: blacksmith-2vcpu-ubuntu-2404
+          #  target: i686-unknown-linux-gnu
+          #  artifact_suffix: i686-ubuntu
 
     steps:
       - uses: actions/checkout@v6
