@@ -1,0 +1,133 @@
+name: Nightly Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+permissions:
+  contents: write
+
+jobs:
+  build_release:
+    name: Build Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # original builds
+          - os: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: x64-ubuntu
+          - os: blacksmith-4vcpu-ubuntu-2404-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_suffix: arm64-ubuntu
+          - os: blacksmith-2vcpu-windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact_suffix: x64-windows
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact_suffix: arm64-windows
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_suffix: arm64-macos
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_suffix: x64-macos
+
+          # new: dedicated Linux i686 job
+          - os: blacksmith-2vcpu-ubuntu-2404
+            target: i686-unknown-linux-gnu
+            artifact_suffix: i686-ubuntu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Install extra 32-bit system libs only for the i686 job
+      - name: Install 32-bit toolchain (i686 only)
+        if: runner.os == 'Linux' && matrix.target == 'i686-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libc6-dev-i386
+
+      - name: Install Rust toolchain and target
+        run: |
+          rustup update stable && rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Release
+        shell: bash
+        run: |
+          # Only apply x86-64-v3 tuning when building x86_64 targets
+          if [[ "${{ matrix.target }}" == x86_64-* ]]; then
+            export RUSTFLAGS="$RUSTFLAGS -C target-cpu=x86-64-v3"
+          fi
+
+          # Statically link the C runtime for the i686 build
+          if [[ "${{ matrix.target }}" == 'i686-unknown-linux-gnu' ]]; then
+            export RUSTFLAGS="$RUSTFLAGS -C target-feature=+crt-static"
+          fi
+
+          cargo build --verbose --release --target ${{ matrix.target }}
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          EXT=""
+          if [[ "${{ matrix.target }}" == *"windows-msvc" ]]; then
+            EXT=".exe"
+          fi
+          cp "target/${{ matrix.target }}/release/pumpkin${EXT}" \
+             "dist/pumpkin-${{ matrix.artifact_suffix }}${EXT}"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: pumpkin-${{ matrix.artifact_suffix }}
+          path: dist/pumpkin-*
+          compression-level: 9
+
+  draft_release:
+    permissions:
+      contents: write
+    needs: [build_release]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download prebuilt binary artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: "**/pumpkin-*"
+          path: dist/
+          merge-multiple: true
+      - name: Generate release notes
+        run: |
+          tree dist/
+          echo "From commit: $(git rev-parse --short HEAD)" > dist/RELEASE.md
+          echo "Generated on: $(date -u +"%Y-%m-%d %H:%M") UTC" >> dist/RELEASE.md
+          cat dist/RELEASE.md
+
+      - name: Update the nightly tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag --force nightly && git push --force origin tag nightly
+          sleep 5
+
+      - name: Draft a nightly github release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: dist/pumpkin*
+          tag_name: nightly
+          name: Nightly Build
+          body_path: dist/RELEASE.md
